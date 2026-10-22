@@ -1,0 +1,39 @@
+import fs, json, log
+
+@json
+pub struct Config {
+    pub u16             port
+    pub u64             timeoutSeconds
+    pub String          blacklistPath
+    pub List[String]    upstreams
+}
+
+pub Config *load(str path) {
+    if not fs.exists(path) {
+        log.error("path {path} does not exist")
+        return null
+    }
+
+    scoped content := fs.readAll(path) catch e {
+        log.error("could not read content of file at {path}: {e.message}")
+        return null
+    }
+
+    Config cfg = json.decode(Config, content) catch e {
+        log.error("could not decode json inside {path}: {e.message}")
+        return null
+    }
+
+    cfg.timeoutSeconds = cfg.timeoutSeconds * 1s
+    
+    Config *p = alloc(Config, 1).ptr
+    *p = cfg
+
+    return p
+}
+
+pub void Config.free() {
+    for u in self.upstreams {
+        u.free()
+    }
+}

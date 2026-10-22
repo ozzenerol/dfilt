@@ -1,0 +1,39 @@
+import net, flags, log, os, fs, str, dns
+import "config", "server"
+
+@flags
+struct Args {
+    str configPath = "config.json"
+}
+
+enum DfiltError {
+    blacklistNotFound
+}
+
+const maxBuffer = 512
+
+Map[str, u32] blacklist
+List[str] upstreams
+
+i32 main() {
+    scoped args := flags.parse(Args)
+
+    config.Config *cfg = config.load(args.configPath)
+    return os.exit(1) if cfg is null
+
+    server.Dns *d = server.newDns(cfg) catch e {
+        log.error("{e.message}")
+        os.exit(1)
+    }
+
+    defer d.free()
+    
+    d.start() catch e {
+        log.error("{e.message}")
+        os.exit(1)
+    }
+
+    return os.exit(0)
+}
+
+

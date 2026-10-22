@@ -1,0 +1,171 @@
+import "config"
+import fs, net, log, str, dns
+
+enum DnsError {
+    invalidConfig,
+    blacklistNotFound,
+    listenFail
+}
+
+pub struct Dns {
+    config.Config   *cfg
+    Map[str, u32]   blacklist
+    Set[str]       upstreams
+}
+
+pub !Dns *newDns(config.Config *cfg) {    
+    return error(DnsError.invalidConfig, "cfg is null") if cfg is null
+
+    Dns *d = alloc(Dns, 1).ptr
+    d.cfg = cfg
+
+    d.loadUpstreams()
+    d.loadBlacklist() catch e {
+        log.error("could not load blacklists: {e.message}")
+        free(d)
+        return null
+    }
+
+    return d
+}
+
+pub !void Dns.start() {
+   socket := net.listenUdp(self.cfg.port) catch e {
+        return error(DnsError.listenFail, "could not listen on port {self.cfg.port}: {e.message}")
+    }
+
+    log.info("UDP server started on port {self.cfg.port}")
+    
+    u8[512] buffer
+    for {
+        n, from := socket.readFrom(buffer[0:512]) catch e {
+            log.error("{e.message}")
+            continue
+        }
+
+        if n == 0 {
+            continue
+        }
+        
+        String data = buffer[0:n].copy()
+        spawn self.handleClient(&socket, data, from)    
+    }
+    
+}
+
+void Dns.handleClient(net.Udp *sock, String buffer, net.Addr from) {
+    defer buffer.free()
+
+    scoped dnsMessage := dns.parse(buffer) catch e {
+        log.error("could not parse dns message from {sock.localAddr()} - reason: {e.message}")
+        return
+    }
+
+    log.info("handling dns message {dnsMessage.header.id}")
+
+    i64 i = dnsMessage.questions.len - 1
+    for i >= 0 {
+        q := dnsMessage.questions.at(i)
+        if self.blacklist.has(q.name) {
+            removed := dnsMessage.questions.remove(i)
+            removed.free()
+        }
+
+        i--
+    }
+
+    if dnsMessage.questions.len is 0 {
+        log.warn("no questions to send. skipping {dnsMessage.header.id}")
+        return
+    }
+
+    scoped String out = dnsMessage.encode() catch e {
+        log.error("could not encode dns message: {e.message}")
+        return
+    }
+    
+    net.Udp chosenConnection
+    bool found = false
+    for up in self.upstreams {
+        addr := net.ip(up, 53) catch e {
+            log.error("could not parse the address for upstream {up}: {e.message}")
+            return
+        }
+
+        chosenConnection = net.dialUdp(addr) catch e {
+            log.warn("could not dial {up}: {e.message}. attempting to dial next upstream")
+            continue
+        }
+
+        found = true
+        break
+    }
+
+    if not found {
+        log.error("could not send the request to any upstream")
+        return
+    }
+
+    defer chosenConnection.close()
+    
+    chosenConnection.setTimeout(i64(self.cfg.timeoutSeconds))
+    
+    chosenConnection.send(out) catch e {
+        log.error("could not send the request to {chosenConnection.localAddr()} - reason: {e.message}")
+        return
+    }
+    
+    u8[1232] buf
+
+    bytesRead := chosenConnection.read(buf[0:1232]) catch e {
+        log.error("could not read buffer: {e.message}")
+        return
+    }
+
+    sock.sendTo(buf[0:bytesRead], from) catch e {
+        log.error("could not send request: {e.message}")
+        return
+    }
+
+    log.info("dns message {dnsMessage.header.id} handled successfully")
+}
+
+
+void Dns.loadUpstreams() {
+    for up in self.cfg.upstreams {
+        self.upstreams.add(up)
+    }
+}
+
+!void Dns.loadBlacklist() {
+    if not fs.exists(self.cfg.blacklistPath) {
+        log.error("{self.cfg.blacklistPath} does not exist")
+        return error(DnsError.blacklistNotFound, "blacklist not found")
+    }
+
+    f := try fs.open(self.cfg.blacklistPath)
+    defer f.close()
+
+    u32 index = 0
+
+    for {
+        scoped line := f.readLine() catch e {
+            log.warn("could not read line {index + 1}: {e.message}")
+            break
+        }
+        
+        item := str.trim(line)
+        if item.len > 0 {
+            self.blacklist.set(item, index)
+            index++
+        }
+    }
+
+    log.info("loaded {self.blacklist.len} items inside the blacklist loaded from {self.cfg.blacklistPath}")
+}
+
+pub void Dns.free() {
+    self.cfg.free() if self.cfg is not null
+    self.blacklist.free()
+    self.upstreams.free()
+}

@@ -1,0 +1,6 @@
+{
+    "port": 8000,
+    "timeoutSeconds": 2,
+    "upstreams": ["1.1.1.1", "8.8.8.8"],
+    "blacklistPath": "../data/blacklist.txt"
+}
